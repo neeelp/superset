@@ -1,0 +1,101 @@
+name: Trigger Devin on Issues
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  trigger-devin:
+    if: github.event.label.name == 'devin'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Skip if already dispatched
+        id: check
+        run: |
+          labels=$(echo '${{ toJSON(github.event.issue.labels) }}' | jq -r '.[].name')
+          if echo "$labels" | grep -qx "devin-dispatched"; then
+            echo "already_dispatched=true" >> "$GITHUB_OUTPUT"
+            echo "Issue #${{ github.event.issue.number }} already dispatched — skipping."
+          else
+            echo "already_dispatched=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Devin session
+        if: steps.check.outputs.already_dispatched == 'false'
+        id: devin
+        env:
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+        run: |
+          prompt="Work on GitHub issue: ${ISSUE_URL}
+
+          Title: ${ISSUE_TITLE}
+
+          ${ISSUE_BODY}"
+
+          payload=$(jq -n --arg prompt "$prompt" '{"prompt": $prompt}')
+
+          response=$(curl -s -f -X POST \
+            "https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions" \
+            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+
+          echo "Devin API response: $response"
+
+          session_url=$(echo "$response" | jq -r '.url // .session_url // empty')
+          session_id=$(echo "$response" | jq -r '.session_id // empty')
+
+          # Fall back to constructing URL from session_id if no url field
+          if [ -z "$session_url" ] && [ -n "$session_id" ]; then
+            session_url="https://app.devin.ai/sessions/${session_id}"
+          fi
+
+          echo "session_url=$session_url" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure devin-dispatched label exists in repo
+        if: steps.check.outputs.already_dispatched == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.github.com/repos/${{ github.repository }}/labels/devin-dispatched" \
+            -H "Authorization: Bearer ${GH_TOKEN}")
+          if [ "$status" = "404" ]; then
+            curl -s -X POST \
+              "https://api.github.com/repos/${{ github.repository }}/labels" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"name":"devin-dispatched","color":"0075ca","description":"Devin remediation session created for this issue"}'
+          fi
+
+      - name: Add devin-dispatched label to issue
+        if: steps.check.outputs.already_dispatched == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/labels" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '["devin-dispatched"]'
+
+      - name: Post Devin session link as issue comment
+        if: steps.check.outputs.already_dispatched == 'false' && steps.devin.outputs.session_url != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SESSION_URL: ${{ steps.devin.outputs.session_url }}
+        run: |
+          body=$(jq -n --arg url "$SESSION_URL" \
+            '"Devin has been assigned to this issue.\n\nSession: \($url)"')
+          curl -s -X POST \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": $body}"
