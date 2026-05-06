@@ -46,6 +46,7 @@ import {
   getFilterValue,
   getPermalinkValue,
 } from 'src/dashboard/components/nativeFilters/FilterBar/keyValue';
+import { clearNativeFilterIndicatorCaches } from 'src/dashboard/components/nativeFilters/selectors';
 import DashboardContainer from 'src/dashboard/containers/Dashboard';
 import CrudThemeProvider from 'src/components/CrudThemeProvider';
 import type { DashboardChartStates } from 'src/dashboard/types/chartState';
@@ -247,6 +248,15 @@ export const DashboardPage: FC<PageProps> = ({ idOrSlug }: PageProps) => {
         'Superset';
     },
     [originalTitle, theme?.brandAppName, theme?.brandLogoAlt],
+  );
+
+  // Flush filter-indicator caches when leaving the dashboard so cached
+  // entries from a previous dashboard cannot leak into the next one.
+  useEffect(
+    () => () => {
+      clearNativeFilterIndicatorCaches();
+    },
+    [],
   );
 
   useEffect(() => {

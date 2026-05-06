@@ -24,6 +24,7 @@ import {
   Filters,
   FilterState,
   getColumnLabel,
+  lruCache,
   NativeFilterType,
   NO_TIME_RANGE,
   QueryFormColumn,
@@ -237,16 +238,20 @@ export const getCrossFilterIndicator = (
   return filterObject;
 };
 
-const cachedIndicatorsForChart: Record<number, Indicator[]> = {};
-const cachedDashboardFilterDataForChart: Record<
-  string,
-  {
-    appliedColumns: Set<string>;
-    rejectedColumns: Set<string>;
-    matchingFilters: Filter[];
-    matchingDatasources: Datasource[];
-  }
-> = {};
+// Bounded caches for filter-indicator computations. Module-level state can
+// otherwise grow unbounded across the SPA lifetime as new chart ids are
+// encountered when navigating between dashboards.
+const INDICATOR_CACHE_CAPACITY = 100;
+
+const cachedIndicatorsForChart = lruCache<Indicator[]>(
+  INDICATOR_CACHE_CAPACITY,
+);
+const cachedDashboardFilterDataForChart = lruCache<{
+  appliedColumns: Set<string>;
+  rejectedColumns: Set<string>;
+  matchingFilters: Filter[];
+  matchingDatasources: Datasource[];
+}>(INDICATOR_CACHE_CAPACITY);
 // inspects redux state to find what the filter indicators should be shown for a given chart
 export const selectIndicatorsForChart = (
   chartId: number,
@@ -267,15 +272,18 @@ export const selectIndicatorsForChart = (
     )
     .map(([, datasource]) => datasource);
 
-  const cachedFilterData = cachedDashboardFilterDataForChart[chartId];
+  const cacheKey = String(chartId);
+  const cachedIndicators = cachedIndicatorsForChart.get(cacheKey);
+  const cachedFilterData = cachedDashboardFilterDataForChart.get(cacheKey);
   if (
-    cachedIndicatorsForChart[chartId] &&
+    cachedIndicators &&
+    cachedFilterData &&
     areObjectsEqual(cachedFilterData.appliedColumns, appliedColumns) &&
     areObjectsEqual(cachedFilterData.rejectedColumns, rejectedColumns) &&
     areObjectsEqual(cachedFilterData.matchingFilters, matchingFilters) &&
     areObjectsEqual(cachedFilterData.matchingDatasources, matchingDatasources)
   ) {
-    return cachedIndicatorsForChart[chartId];
+    return cachedIndicators;
   }
   const indicators = matchingFilters.reduce(
     (acc, filter) =>
@@ -291,13 +299,13 @@ export const selectIndicatorsForChart = (
     [] as Indicator[],
   );
   indicators.sort((a, b) => a.name.localeCompare(b.name));
-  cachedIndicatorsForChart[chartId] = indicators;
-  cachedDashboardFilterDataForChart[chartId] = {
+  cachedIndicatorsForChart.set(cacheKey, indicators);
+  cachedDashboardFilterDataForChart.set(cacheKey, {
     appliedColumns,
     rejectedColumns,
     matchingFilters,
     matchingDatasources,
-  };
+  });
   return indicators;
 };
 
@@ -376,18 +384,29 @@ export const selectChartCrossFilters = (
   return crossFilterIndicators;
 };
 
-const cachedNativeIndicatorsForChart: Record<number, any> = {};
-const cachedNativeFilterDataForChart: Record<
-  number,
-  {
-    nativeFilters: Filters;
-    chartLayoutItems: LayoutItem[];
-    chartConfiguration: ChartConfiguration;
-    dataMask: DataMaskStateWithId;
-    appliedColumns: Set<string>;
-    rejectedColumns: Set<string>;
-  }
-> = {};
+const cachedNativeIndicatorsForChart = lruCache<
+  (Indicator | CrossFilterIndicator)[]
+>(INDICATOR_CACHE_CAPACITY);
+const cachedNativeFilterDataForChart = lruCache<{
+  nativeFilters: Filters;
+  chartLayoutItems: LayoutItem[];
+  chartConfiguration: ChartConfiguration;
+  dataMask: DataMaskStateWithId;
+  appliedColumns: Set<string>;
+  rejectedColumns: Set<string>;
+}>(INDICATOR_CACHE_CAPACITY);
+
+/**
+ * Flush all in-memory caches used by the filter-indicator selectors. Should
+ * be invoked when navigating away from a dashboard so cached entries from a
+ * previous dashboard are not reused if chart ids collide.
+ */
+export const clearNativeFilterIndicatorCaches = (): void => {
+  cachedIndicatorsForChart.clear();
+  cachedDashboardFilterDataForChart.clear();
+  cachedNativeIndicatorsForChart.clear();
+  cachedNativeFilterDataForChart.clear();
+};
 
 export const selectNativeIndicatorsForChart = (
   nativeFilters: Filters,
@@ -405,9 +424,12 @@ export const selectNativeIndicatorsForChart = (
   );
   const rejectedColumns = getRejectedColumns(chart);
 
-  const cachedFilterData = cachedNativeFilterDataForChart[chartId];
+  const cacheKey = String(chartId);
+  const cachedIndicators = cachedNativeIndicatorsForChart.get(cacheKey);
+  const cachedFilterData = cachedNativeFilterDataForChart.get(cacheKey);
   if (
-    cachedNativeIndicatorsForChart[chartId]?.length &&
+    cachedIndicators?.length &&
+    cachedFilterData &&
     areObjectsEqual(cachedFilterData.appliedColumns, appliedColumns) &&
     areObjectsEqual(cachedFilterData.rejectedColumns, rejectedColumns) &&
     areObjectsEqual(cachedFilterData.nativeFilters, nativeFilters) &&
@@ -415,7 +437,7 @@ export const selectNativeIndicatorsForChart = (
     areObjectsEqual(cachedFilterData.chartConfiguration, chartConfiguration) &&
     areObjectsEqual(cachedFilterData.dataMask, dataMask)
   ) {
-    return cachedNativeIndicatorsForChart[chartId];
+    return cachedIndicators;
   }
   const nativeFilterIndicators =
     nativeFilters &&
@@ -455,14 +477,14 @@ export const selectNativeIndicatorsForChart = (
   const indicators = crossFilterIndicators.concat(
     nativeFilterIndicators as Indicator[],
   );
-  cachedNativeIndicatorsForChart[chartId] = indicators;
-  cachedNativeFilterDataForChart[chartId] = {
+  cachedNativeIndicatorsForChart.set(cacheKey, indicators);
+  cachedNativeFilterDataForChart.set(cacheKey, {
     nativeFilters,
     chartLayoutItems,
     chartConfiguration,
     dataMask,
     appliedColumns,
     rejectedColumns,
-  };
+  });
   return indicators;
 };

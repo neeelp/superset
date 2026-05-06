@@ -19,9 +19,12 @@
 import { CHART_TYPE } from 'src/dashboard/util/componentTypes';
 import { NativeFilterType } from '@superset-ui/core';
 import {
+  clearNativeFilterIndicatorCaches,
   extractLabel,
   getAppliedColumnsWithFallback,
   getCrossFilterIndicator,
+  selectIndicatorsForChart,
+  selectNativeIndicatorsForChart,
 } from './selectors';
 
 // eslint-disable-next-line no-restricted-globals -- TODO: Migrate from describe blocks
@@ -564,4 +567,110 @@ test('getAppliedColumnsWithFallback prioritizes query response over fallback', (
     123,
   );
   expect(result).toEqual(new Set(['query_column']));
+});
+
+test('selectIndicatorsForChart returns the cached result on repeated calls with identical inputs', () => {
+  clearNativeFilterIndicatorCaches();
+  const chart = { queriesResponse: [{ applied_filters: [] }] };
+  const filters = {};
+  const datasources = {};
+  const first = selectIndicatorsForChart(1, filters, datasources, chart);
+  const second = selectIndicatorsForChart(1, filters, datasources, chart);
+  expect(second).toBe(first);
+});
+
+test('clearNativeFilterIndicatorCaches forces a fresh computation', () => {
+  clearNativeFilterIndicatorCaches();
+  const chart = { queriesResponse: [{ applied_filters: [] }] };
+  const filters = {};
+  const datasources = {};
+  const first = selectIndicatorsForChart(2, filters, datasources, chart);
+  clearNativeFilterIndicatorCaches();
+  const second = selectIndicatorsForChart(2, filters, datasources, chart);
+  expect(second).not.toBe(first);
+  expect(second).toEqual(first);
+});
+
+test('selectIndicatorsForChart cache is bounded and evicts the oldest entry', () => {
+  clearNativeFilterIndicatorCaches();
+  const chart = { queriesResponse: [{ applied_filters: [] }] };
+  const filters = {};
+  const datasources = {};
+  // Insert chartId 0, then 100 more distinct chartIds (1..100). Cache
+  // capacity is 100, so inserting the 101st distinct entry must evict 0.
+  const firstForZero = selectIndicatorsForChart(0, filters, datasources, chart);
+  for (let chartId = 1; chartId <= 100; chartId += 1) {
+    selectIndicatorsForChart(chartId, filters, datasources, chart);
+  }
+  const secondForZero = selectIndicatorsForChart(
+    0,
+    filters,
+    datasources,
+    chart,
+  );
+  expect(secondForZero).not.toBe(firstForZero);
+  expect(secondForZero).toEqual(firstForZero);
+});
+
+test('selectNativeIndicatorsForChart cache is bounded by the LRU capacity', () => {
+  clearNativeFilterIndicatorCaches();
+  const chartsInScope = Array.from({ length: 102 }, (_, i) => i);
+  const chart = { queriesResponse: [{ applied_filters: [{ column: 'a' }] }] };
+  const nativeFilters = {
+    f1: {
+      id: 'f1',
+      name: 'f1',
+      type: NativeFilterType.NativeFilter,
+      chartsInScope,
+      targets: [{ column: { name: 'a' } }],
+    },
+  } as any;
+  const dataMask = {
+    f1: { id: 'f1', filterState: { value: 'x' }, extraFormData: {} },
+  } as any;
+  const layout: any[] = [];
+  const config = {};
+  // Sanity: a fresh call with non-empty indicators is cached and hits on the
+  // second invocation with identical inputs.
+  const firstForZero = selectNativeIndicatorsForChart(
+    nativeFilters,
+    dataMask,
+    0,
+    chart,
+    layout,
+    config,
+  );
+  expect(firstForZero.length).toBeGreaterThan(0);
+  expect(
+    selectNativeIndicatorsForChart(
+      nativeFilters,
+      dataMask,
+      0,
+      chart,
+      layout,
+      config,
+    ),
+  ).toBe(firstForZero);
+  // Push enough distinct chartIds through the cache to force eviction of the
+  // oldest entry (capacity is 100). chartId 0 is the LRU after this loop.
+  for (let chartId = 1; chartId < 101; chartId += 1) {
+    selectNativeIndicatorsForChart(
+      nativeFilters,
+      dataMask,
+      chartId,
+      chart,
+      layout,
+      config,
+    );
+  }
+  const secondForZero = selectNativeIndicatorsForChart(
+    nativeFilters,
+    dataMask,
+    0,
+    chart,
+    layout,
+    config,
+  );
+  expect(secondForZero).not.toBe(firstForZero);
+  expect(secondForZero).toEqual(firstForZero);
 });
