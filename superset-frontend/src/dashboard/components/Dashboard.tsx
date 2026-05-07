@@ -24,7 +24,14 @@ import { Loading } from '@superset-ui/core/components';
 import { PluginContext } from 'src/components';
 import type { PluginContextType } from 'src/components/DynamicPlugins/types';
 import getBootstrapData from 'src/utils/getBootstrapData';
-import type { Slice } from 'src/dashboard/types';
+import type {
+  Slice,
+  ActiveFilters,
+  ChartConfiguration,
+  DashboardLayout,
+  DatasourcesState,
+  LayoutItem,
+} from 'src/dashboard/types';
 import getChartIdsFromLayout from '../util/getChartIdsFromLayout';
 import getLayoutComponentFromChartId from '../util/getLayoutComponentFromChartId';
 
@@ -35,6 +42,7 @@ import {
 } from '../../logger/LogUtils';
 import { areObjectsEqual } from '../../reduxUtils';
 
+import { clearIndicatorsCache } from './nativeFilters/selectors';
 import getLocationHash from '../util/getLocationHash';
 import isDashboardEmpty from '../util/isDashboardEmpty';
 import type {
@@ -44,13 +52,6 @@ import type {
 } from '@superset-ui/core';
 import { getAffectedOwnDataCharts } from '../util/charts/getOwnDataCharts';
 import { getRelatedCharts } from '../util/getRelatedCharts';
-import type {
-  ActiveFilters,
-  ChartConfiguration,
-  DashboardLayout,
-  DatasourcesState,
-  LayoutItem,
-} from '../types';
 
 type RelatedChartsFilter =
   | AppliedNativeFilterType
@@ -227,6 +228,7 @@ class Dashboard extends PureComponent<DashboardProps> {
     window.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.props.actions.clearDataMaskState();
     this.props.actions.clearAllChartStates();
+    clearIndicatorsCache();
   }
 
   onVisibilityChange(): void {

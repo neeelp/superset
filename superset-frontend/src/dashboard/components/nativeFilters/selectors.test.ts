@@ -19,9 +19,12 @@
 import { CHART_TYPE } from 'src/dashboard/util/componentTypes';
 import { NativeFilterType } from '@superset-ui/core';
 import {
+  clearIndicatorsCache,
   extractLabel,
   getAppliedColumnsWithFallback,
   getCrossFilterIndicator,
+  selectIndicatorsForChart,
+  selectNativeIndicatorsForChart,
 } from './selectors';
 
 // eslint-disable-next-line no-restricted-globals -- TODO: Migrate from describe blocks
@@ -564,4 +567,137 @@ test('getAppliedColumnsWithFallback prioritizes query response over fallback', (
     123,
   );
   expect(result).toEqual(new Set(['query_column']));
+});
+
+test('clearIndicatorsCache empties memoized indicator results', () => {
+  const filters = {
+    1: {
+      chartId: 1,
+      columns: { country: 'US' },
+      scopes: { country: { scope: ['ROOT_ID'], immune: [] } },
+      labels: { country: 'Country' },
+      isDateFilter: false,
+      directPathToFilter: ['ROOT_ID'],
+      datasourceId: 'ds-1',
+    },
+  } as any;
+  const datasources = { 'ds-1': {} } as any;
+  const chart = {
+    queriesResponse: [{ applied_filters: [{ column: 'country' }] }],
+  };
+
+  const first = selectIndicatorsForChart(2, filters, datasources, chart);
+  // Same inputs hit the cache and return the same array reference.
+  const second = selectIndicatorsForChart(2, filters, datasources, chart);
+  expect(second).toBe(first);
+
+  clearIndicatorsCache();
+
+  const third = selectIndicatorsForChart(2, filters, datasources, chart);
+  expect(third).not.toBe(first);
+  expect(third).toEqual(first);
+});
+
+test('selectNativeIndicatorsForChart cache survives until cleared', () => {
+  const nativeFilters = {
+    f1: {
+      id: 'f1',
+      type: NativeFilterType.NativeFilter,
+      name: 'Country',
+      chartsInScope: [10],
+      targets: [{ column: { name: 'country' } }],
+    },
+  } as any;
+  const dataMask = {
+    f1: { id: 'f1', filterState: { value: 'US' }, extraFormData: {} },
+  } as any;
+  const chart = {
+    queriesResponse: [{ applied_filters: [{ column: 'country' }] }],
+  };
+  const chartLayoutItems: any[] = [];
+
+  const a = selectNativeIndicatorsForChart(
+    nativeFilters,
+    dataMask,
+    10,
+    chart,
+    chartLayoutItems,
+  );
+  const b = selectNativeIndicatorsForChart(
+    nativeFilters,
+    dataMask,
+    10,
+    chart,
+    chartLayoutItems,
+  );
+  expect(b).toBe(a);
+
+  clearIndicatorsCache();
+
+  const c = selectNativeIndicatorsForChart(
+    nativeFilters,
+    dataMask,
+    10,
+    chart,
+    chartLayoutItems,
+  );
+  expect(c).not.toBe(a);
+  expect(c).toEqual(a);
+});
+
+test('selectIndicatorsForChart cache evicts oldest entries beyond max size', () => {
+  // The cache cap is 100 chartIds; insert 101 distinct ids and confirm the
+  // first one is evicted (its result is recomputed to a fresh reference)
+  // while a recent id remains memoized.
+  clearIndicatorsCache();
+
+  const datasources = { 'ds-1': {} } as any;
+  const chart = { queriesResponse: [{ applied_filters: [] }] };
+  const makeFilters = (chartId: number) =>
+    ({
+      [chartId + 1000]: {
+        chartId: chartId + 1000,
+        columns: { country: 'US' },
+        scopes: { country: { scope: ['ROOT_ID'], immune: [] } },
+        labels: { country: 'Country' },
+        isDateFilter: false,
+        directPathToFilter: ['ROOT_ID'],
+        datasourceId: 'ds-1',
+      },
+    }) as any;
+
+  const firstResult = selectIndicatorsForChart(
+    0,
+    makeFilters(0),
+    datasources,
+    chart,
+  );
+  for (let i = 1; i <= 100; i += 1) {
+    selectIndicatorsForChart(i, makeFilters(i), datasources, chart);
+  }
+
+  // Recent entry still cached.
+  const recent = selectIndicatorsForChart(
+    100,
+    makeFilters(100),
+    datasources,
+    chart,
+  );
+  const recentAgain = selectIndicatorsForChart(
+    100,
+    makeFilters(100),
+    datasources,
+    chart,
+  );
+  expect(recentAgain).toBe(recent);
+
+  // Oldest entry (chartId=0) was evicted: a recompute returns a new reference.
+  const refetched = selectIndicatorsForChart(
+    0,
+    makeFilters(0),
+    datasources,
+    chart,
+  );
+  expect(refetched).not.toBe(firstResult);
+  expect(refetched).toEqual(firstResult);
 });
