@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import pickle
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -208,7 +208,7 @@ def test_get_expired_entry(
         value=JSON_VALUE,
         codec=JSON_CODEC,
         key=ID_KEY,
-        expires_on=datetime.now() - timedelta(days=1),
+        expires_on=datetime.now(timezone.utc) - timedelta(days=1),
     )
     found_entry = KeyValueDAO.get_entry(resource=RESOURCE, key=created_entry.id)
     assert found_entry is not None
@@ -226,7 +226,7 @@ def test_get_future_expiring_entry(
         value=JSON_VALUE,
         codec=JSON_CODEC,
         key=ID_KEY,
-        expires_on=datetime.now() + timedelta(days=1),
+        expires_on=datetime.now(timezone.utc) + timedelta(days=1),
     )
     found_entry = KeyValueDAO.get_entry(resource=RESOURCE, key=created_entry.id)
     assert found_entry is not None
