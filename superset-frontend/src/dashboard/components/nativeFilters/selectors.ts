@@ -237,16 +237,64 @@ export const getCrossFilterIndicator = (
   return filterObject;
 };
 
-const cachedIndicatorsForChart: Record<number, Indicator[]> = {};
-const cachedDashboardFilterDataForChart: Record<
-  string,
-  {
-    appliedColumns: Set<string>;
-    rejectedColumns: Set<string>;
-    matchingFilters: Filter[];
-    matchingDatasources: Datasource[];
+// Bounded LRU cache to prevent unbounded memory growth as users navigate
+// across dashboards or as charts are added/removed within a long-lived SPA
+// session. Entries are evicted on insertion once the cache exceeds maxSize.
+class IndicatorLRUCache<TKey, TIndicators extends Indicator[]> {
+  private readonly map = new Map<
+    number,
+    { indicators: TIndicators; key: TKey }
+  >();
+
+  constructor(private readonly maxSize: number) {}
+
+  get(chartId: number): { indicators: TIndicators; key: TKey } | undefined {
+    const entry = this.map.get(chartId);
+    if (entry === undefined) return undefined;
+    // Refresh recency by re-inserting at the end of the iteration order.
+    this.map.delete(chartId);
+    this.map.set(chartId, entry);
+    return entry;
   }
-> = {};
+
+  set(chartId: number, indicators: TIndicators, key: TKey): void {
+    if (this.map.has(chartId)) {
+      this.map.delete(chartId);
+    } else if (this.map.size >= this.maxSize) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.map.delete(oldestKey);
+      }
+    }
+    this.map.set(chartId, { indicators, key });
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
+
+// 100 entries comfortably covers any reasonable dashboard while keeping memory
+// bounded; the cache is keyed by chartId so this is the max number of charts
+// whose indicator computations are memoized at once.
+const INDICATOR_CACHE_MAX_SIZE = 100;
+
+type DashboardFilterCacheKey = {
+  appliedColumns: Set<string>;
+  rejectedColumns: Set<string>;
+  matchingFilters: Filter[];
+  matchingDatasources: Datasource[];
+};
+
+const dashboardIndicatorCache = new IndicatorLRUCache<
+  DashboardFilterCacheKey,
+  Indicator[]
+>(INDICATOR_CACHE_MAX_SIZE);
+
 // inspects redux state to find what the filter indicators should be shown for a given chart
 export const selectIndicatorsForChart = (
   chartId: number,
@@ -254,7 +302,7 @@ export const selectIndicatorsForChart = (
   datasources: { [key: string]: Datasource },
   chart: any,
 ): Indicator[] => {
-  // for now we only need to know which columns are compatible/incompatible,
+  // we only need to know which columns are compatible/incompatible,
   // so grab the columns from the applied/rejected filters
   const appliedColumns = getAppliedColumns(chart);
   const rejectedColumns = getRejectedColumns(chart);
@@ -267,15 +315,15 @@ export const selectIndicatorsForChart = (
     )
     .map(([, datasource]) => datasource);
 
-  const cachedFilterData = cachedDashboardFilterDataForChart[chartId];
+  const cached = dashboardIndicatorCache.get(chartId);
   if (
-    cachedIndicatorsForChart[chartId] &&
-    areObjectsEqual(cachedFilterData.appliedColumns, appliedColumns) &&
-    areObjectsEqual(cachedFilterData.rejectedColumns, rejectedColumns) &&
-    areObjectsEqual(cachedFilterData.matchingFilters, matchingFilters) &&
-    areObjectsEqual(cachedFilterData.matchingDatasources, matchingDatasources)
+    cached &&
+    areObjectsEqual(cached.key.appliedColumns, appliedColumns) &&
+    areObjectsEqual(cached.key.rejectedColumns, rejectedColumns) &&
+    areObjectsEqual(cached.key.matchingFilters, matchingFilters) &&
+    areObjectsEqual(cached.key.matchingDatasources, matchingDatasources)
   ) {
-    return cachedIndicatorsForChart[chartId];
+    return cached.indicators;
   }
   const indicators = matchingFilters.reduce(
     (acc, filter) =>
@@ -291,13 +339,12 @@ export const selectIndicatorsForChart = (
     [] as Indicator[],
   );
   indicators.sort((a, b) => a.name.localeCompare(b.name));
-  cachedIndicatorsForChart[chartId] = indicators;
-  cachedDashboardFilterDataForChart[chartId] = {
+  dashboardIndicatorCache.set(chartId, indicators, {
     appliedColumns,
     rejectedColumns,
     matchingFilters,
     matchingDatasources,
-  };
+  });
   return indicators;
 };
 
@@ -376,18 +423,29 @@ export const selectChartCrossFilters = (
   return crossFilterIndicators;
 };
 
-const cachedNativeIndicatorsForChart: Record<number, any> = {};
-const cachedNativeFilterDataForChart: Record<
-  number,
-  {
-    nativeFilters: Filters;
-    chartLayoutItems: LayoutItem[];
-    chartConfiguration: ChartConfiguration;
-    dataMask: DataMaskStateWithId;
-    appliedColumns: Set<string>;
-    rejectedColumns: Set<string>;
-  }
-> = {};
+type NativeFilterCacheKey = {
+  nativeFilters: Filters;
+  chartLayoutItems: LayoutItem[];
+  chartConfiguration: ChartConfiguration;
+  dataMask: DataMaskStateWithId;
+  appliedColumns: Set<string>;
+  rejectedColumns: Set<string>;
+};
+
+const nativeIndicatorCache = new IndicatorLRUCache<
+  NativeFilterCacheKey,
+  (Indicator | CrossFilterIndicator)[]
+>(INDICATOR_CACHE_MAX_SIZE);
+
+/**
+ * Clears the bounded indicator caches. Should be called when the active
+ * dashboard changes (e.g., from the dashboard component's unmount handler)
+ * so that stale entries do not linger across navigations.
+ */
+export const clearIndicatorsCache = (): void => {
+  dashboardIndicatorCache.clear();
+  nativeIndicatorCache.clear();
+};
 
 export const selectNativeIndicatorsForChart = (
   nativeFilters: Filters,
@@ -405,17 +463,17 @@ export const selectNativeIndicatorsForChart = (
   );
   const rejectedColumns = getRejectedColumns(chart);
 
-  const cachedFilterData = cachedNativeFilterDataForChart[chartId];
+  const cached = nativeIndicatorCache.get(chartId);
   if (
-    cachedNativeIndicatorsForChart[chartId]?.length &&
-    areObjectsEqual(cachedFilterData.appliedColumns, appliedColumns) &&
-    areObjectsEqual(cachedFilterData.rejectedColumns, rejectedColumns) &&
-    areObjectsEqual(cachedFilterData.nativeFilters, nativeFilters) &&
-    areObjectsEqual(cachedFilterData.chartLayoutItems, chartLayoutItems) &&
-    areObjectsEqual(cachedFilterData.chartConfiguration, chartConfiguration) &&
-    areObjectsEqual(cachedFilterData.dataMask, dataMask)
+    cached?.indicators.length &&
+    areObjectsEqual(cached.key.appliedColumns, appliedColumns) &&
+    areObjectsEqual(cached.key.rejectedColumns, rejectedColumns) &&
+    areObjectsEqual(cached.key.nativeFilters, nativeFilters) &&
+    areObjectsEqual(cached.key.chartLayoutItems, chartLayoutItems) &&
+    areObjectsEqual(cached.key.chartConfiguration, chartConfiguration) &&
+    areObjectsEqual(cached.key.dataMask, dataMask)
   ) {
-    return cachedNativeIndicatorsForChart[chartId];
+    return cached.indicators;
   }
   const nativeFilterIndicators =
     nativeFilters &&
@@ -455,14 +513,13 @@ export const selectNativeIndicatorsForChart = (
   const indicators = crossFilterIndicators.concat(
     nativeFilterIndicators as Indicator[],
   );
-  cachedNativeIndicatorsForChart[chartId] = indicators;
-  cachedNativeFilterDataForChart[chartId] = {
+  nativeIndicatorCache.set(chartId, indicators, {
     nativeFilters,
     chartLayoutItems,
     chartConfiguration,
     dataMask,
     appliedColumns,
     rejectedColumns,
-  };
+  });
   return indicators;
 };
